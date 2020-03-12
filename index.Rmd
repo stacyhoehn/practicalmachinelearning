@@ -1,5 +1,5 @@
 ---
-title: "Practical Machine Learning Course Project"
+title: "Practical Machine Learning Final Project"
 author: "Stacy Hoehn"
 date: "3/12/2020"
 output: html_document
@@ -9,22 +9,166 @@ output: html_document
 knitr::opts_chunk$set(echo = TRUE)
 ```
 
-## R Markdown
+## Introduction
 
-This is an R Markdown document. Markdown is a simple formatting syntax for authoring HTML, PDF, and MS Word documents. For more details on using R Markdown see <http://rmarkdown.rstudio.com>.
+In the study described at http://groupware.les.inf.puc-rio.br/har, six young participants were asked to perform one set of 10 repetitions of the Unilateral Dumbbell Biceps Curl in five different fashions: exactly according to the specification (Class A), throwing the elbows to the front (Class B), lifting the dumbbell only halfway (Class C), lowering the dumbbell only halfway (Class D) and throwing the hips to the front (Class E). In this project, our goal is to use data from accelerometers on the belt, forearm, arm, and dumbell of these participants to predict if the task was performed correctly (Class A) or what type of mistake (Class B-E) was made. 
 
-When you click the **Knit** button a document will be generated that includes both content as well as the output of any embedded R code chunks within the document. You can embed an R code chunk like this:
 
-```{r cars}
-summary(cars)
+## Importing the Data
+
+The training data for this project are available at 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv, while the test data are available at 
+https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv.  We begin by importing these data sets and loading all necessary packages.
+
+
+```{r,warning=FALSE,message=FALSE}
+library(caret)
+library(rattle)
+library(randomForest)
+library(gbm)
+
+trainingData <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-training.csv",header=T,na.strings=c("", "NA"))
+
+testData <- read.csv("https://d396qusza40orc.cloudfront.net/predmachlearn/pml-testing.csv",header=T,na.strings=c("", "NA"))
 ```
 
-## Including Plots
+## Cross-Validation
 
-You can also embed plots, for example:
+We split the training data imported above into two sets to use for cross-validation.  
 
-```{r pressure, echo=FALSE}
-plot(pressure)
+```{r}
+set.seed(314)
+inTrain  <- createDataPartition(trainingData$classe, p=0.7, list=FALSE)
+trainingSet <- trainingData[inTrain, ]
+validationSet  <- trainingData[-inTrain, ]
 ```
 
-Note that the `echo = FALSE` parameter was added to the code chunk to prevent printing of the R code that generated the plot.
+## Preparing the Data
+
+When we view the training set, many of the columns appear to be filled mostly with NAs. We explore this further below. 
+
+```{r}
+naPerColumn <- colSums(is.na(trainingSet))
+table(naPerColumn)
+```
+
+Of the 160 columns in the dataset, 60 of them do not contain any NAs, while the remaining columns contain mostly NAs.   We remove those 100 columns from the training and validation sets.
+
+```{r}
+completeColumns <- colnames(trainingSet[,naPerColumn == 0])
+
+trainingSet <- trainingSet[,completeColumns]
+validationSet <- validationSet[,completeColumns]
+```
+
+Next, we check to see if any of the columns have near-zero variance . It turns out that only the "new_window" column has near-zero variance; we remove that column from the training and validation data.
+```{r}
+NZV <- nearZeroVar(trainingSet)
+colnames(trainingSet[NZV])
+
+trainingSet <- trainingSet[, -NZV]
+validationSet <- validationSet[,-NZV]
+```
+
+We next inspect the remaining columns to see if we are done preparing our data. 
+
+```{r}
+#preview the first few entries in the dataset
+head(trainingSet,n=4)
+```
+
+The first six columns contain primarily identifier-type information that is not likely to be helpful for our models.  As such, we remove those columns from our training and validation sets.
+
+```{r}
+trainingSet <- trainingSet[,-(1:6)]
+validationSet <- validationSet[,-(1:6)]
+```
+
+## Building the Models
+
+Now that we have prepared our data, we are ready to begin building models.   We will use decision trees, random forests, and boosting with trees.
+
+### Decision Tree
+
+We begin with a decision tree model.
+
+```{r}
+TreeFit <- train(classe~.,method="rpart",data=trainingSet)
+print(TreeFit$finalModel)
+
+fancyRpartPlot(TreeFit$finalModel)
+```
+
+We can see from the information given above that our decision tree makes use of four variables: roll_belt, pitch_forearm, magnet_dumbbell_y, and roll_forearm. 
+
+We now apply this model to our validation set to determine the out of sample error.
+
+```{r}
+predictionsTree <- predict(TreeFit, validationSet,method="class")
+confusionMatrix(predictionsTree,validationSet$classe)
+```
+
+While this is a fairly simple model to understand and use, the drawback is that the model only has an accuracy of 0.4909, giving an out of sample error rate of 0.5091. It does especially bad at detecting class D, which corresponds to lowering the dumbbell only halfway. 
+
+### Random Forest
+
+The next model we fit to the data is a random forest.
+
+```{r}
+ForestFit <- randomForest(classe~.,data=trainingSet)
+varImpPlot(ForestFit,n.var=10)
+```
+
+We can see from the plot above that the most important variables in the random forest model are roll_belt, yaw_belt, pitch_forearm, magnet_dumbbell_z, magnet_dumbbell_y, and pitch_belt.  
+
+We now apply this model to our validation set to determine the out of sample error.
+
+```{r}
+predictionsForest <- predict(ForestFit, validationSet,method="class")
+confusionMatrix(predictionsForest,validationSet$classe)
+```
+
+This model performs much better, with an accuracy rate of 0.9947 (and thus an out of sample error rate of 0.0053). The model performs well across all classes in the validation set. 
+
+### Boosting with Trees 
+
+Finally, we create a model that uses boosting with trees.
+
+```{r}
+fitControl <- trainControl(method = "repeatedcv",
+                           number = 5,
+                           repeats = 1)
+BoostingFit <- train(classe~.,method="gbm",data=trainingSet,trControl = fitControl,verbose=FALSE)
+summary(BoostingFit)
+```
+
+We can see from the above output that the roll_belt,  pitch_forearm, yaw_belt, magnet_dumbbell_z, magnet_dumbbell_y, and roll_forearm variables have the most influence on this model. 
+
+We now apply this model to our validation set to determine the out of sample error.
+
+```{r}
+predictionsBoost <- predict(BoostingFit,validationSet,method="class")
+confusionMatrix(predictionsBoost,validationSet$classe)
+```
+
+This model has an accuracy rate of 0.9626, giving an out of sample error rate of 0.0374.   Thus, it performs pretty well, but not quite as well as the random forest model.
+
+## Making Predictions
+
+Since the random forest model performed the best, we use that model to make predictions for the test data set.   
+
+We begin by preparing the test data in the same way we did for our training data. We first remove all but the complete columns from the test data. Note that the 60th complete column in the training set is the classe variable, which isn't in the test set.  Thus, we  focus on the first 59 complete columns. Then, we  remove columns 1-7 since columns 1-6 contain identifier-type information and since column 7 (new_window) had near-zero variance in the training set.  
+
+```{r}
+
+testData <- testData[,completeColumns[1:59]]
+testData <- testData[,-(1:7)]
+```
+
+Now that the data has been prepared, we make predictions for the test data using our random forest model.  These values will be entered into the course project prediction quiz.
+
+```{r}
+testPredictionsRF <- predict(ForestFit,testData,method="class")
+testPredictionsRF
+```
+
